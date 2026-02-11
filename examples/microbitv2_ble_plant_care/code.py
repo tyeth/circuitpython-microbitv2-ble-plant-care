@@ -274,6 +274,15 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
     was_connected = False
     deadline = time.monotonic() + ACTIVE_SECONDS
 
+    def extend_deadline(seconds, reason):
+        nonlocal deadline
+        now = time.monotonic()
+        new_deadline = max(deadline, now + seconds)
+        if new_deadline != deadline:
+            deadline = new_deadline
+            remaining = int(deadline - now)
+            print(reason, "active window +", seconds, "s; remaining:", remaining, "s")
+
     while time.monotonic() < deadline:
         led.refresh()
 
@@ -284,7 +293,7 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
                 print("BLE: connected")
                 flash_icon(led, ICON_BLE)
                 draw_graph(led, history)
-                deadline = max(deadline, time.monotonic() + BLE_EXTEND_SECONDS)
+                extend_deadline(BLE_EXTEND_SECONDS, "BLE: connected")
             pv = pc.value
             if pv and pv[0] > 0:
                 duration = pv[0]
@@ -293,7 +302,7 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
                 pump_on(duration)
                 pc.value = bytes([0])
                 moisture, history = do_read(mc, led)
-                deadline = max(deadline, time.monotonic() + BLE_EXTEND_SECONDS)
+                extend_deadline(BLE_EXTEND_SECONDS, "BLE: pump")
             # Check for sleep interval change
             sv = sc.value
             if sv and len(sv) >= 2:
@@ -303,12 +312,12 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
                     WAKES_PER_DAY = (24 * 3600) // SLEEP_SECONDS
                     print("BLE: sleep set to", SLEEP_SECONDS, "s, wakes/day:", WAKES_PER_DAY)
             # Any active connection keeps extending the deadline
-            deadline = max(deadline, time.monotonic() + BLE_EXTEND_SECONDS)
+            extend_deadline(BLE_EXTEND_SECONDS, "BLE: active")
         else:
             if was_connected:
                 was_connected = False
                 print("BLE: disconnected, +30s grace")
-                deadline = max(deadline, time.monotonic() + BLE_EXTEND_SECONDS)
+                extend_deadline(BLE_EXTEND_SECONDS, "BLE: disconnected")
                 try:
                     ble_start_adv(adv)
                 except:
@@ -319,7 +328,7 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
             print("BTN A: reading sensor")
             flash_icon(led, ICON_READ)
             moisture, history = do_read(mc, led)
-            deadline = max(deadline, time.monotonic() + EXTEND_SECONDS)
+            extend_deadline(EXTEND_SECONDS, "BTN A")
             while not btn_a.value:
                 led.refresh()
 
@@ -328,7 +337,7 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
             flash_icon(led, ICON_PUMP)
             pump_on()
             moisture, history = do_read(mc, led)
-            deadline = max(deadline, time.monotonic() + EXTEND_SECONDS)
+            extend_deadline(EXTEND_SECONDS, "BTN B")
             while not btn_b.value:
                 led.refresh()
 
