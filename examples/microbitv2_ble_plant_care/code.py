@@ -192,7 +192,6 @@ def pump_on(seconds=PUMP_SECONDS):
     last_pump_time = time.monotonic()
     log("PUMP OFF")
 
-
 # ============================================================
 # BLE
 # ============================================================
@@ -200,8 +199,7 @@ def ble_setup():
     svc = _bleio.Service(SVC_UUID)
     mc = _bleio.Characteristic.add_to_service(
         svc, MOIST_UUID,
-        properties=_bleio.Characteristic.READ | _bleio.Characteristic.NOTIFY |
-                   _bleio.Characteristic.WRITE,
+        properties=_bleio.Characteristic.READ | _bleio.Characteristic.WRITE,
         read_perm=_bleio.Attribute.OPEN,
         write_perm=_bleio.Attribute.OPEN,
         max_length=1, fixed_length=True,
