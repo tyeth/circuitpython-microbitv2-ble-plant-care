@@ -2,7 +2,7 @@
 # P1 = Soil moisture (analog), P2 = Pump MOSFET (digital)
 #
 # BLE Testing with nRF Connect:
-#   Device name: "PlantBit"
+#   Device name: "PlantBit-XXXX" (XXXX = last 2 bytes of BLE MAC)
 #   Service:  12340001-1234-5678-1234-56789abcdef0
 #   Moisture: 12340002-1234-5678-1234-56789abcdef0  READ/NOTIFY/WRITE  (1 byte, 0-100%)
 #   Pump:     12340003-1234-5678-1234-56789abcdef0  READ/WRITE   (1 byte = seconds, e.g. 0x03 = 3s)
@@ -51,8 +51,9 @@ log("config: sleep", SLEEP_SECONDS, "s, mode", SLEEP_MODE)
 ACTIVE_SECONDS = 15
 EXTEND_SECONDS = 5
 BLE_EXTEND_SECONDS = 30
-BLE_EXTEND_THROTTLE = 1.0
-PUMP_SECONDS = 0.5
+BLE_EXTEND_MARGIN = 2.0
+BLE_POLL_INTERVAL = 0.1
+PUMP_SECONDS = 2.5
 PUMP_COOLDOWN = 10  # skip moisture reads this many seconds after pump
 N_SAMPLES = 10
 WAKES_PER_DAY = (24 * 3600) // SLEEP_SECONDS  # 1440 at 60s
@@ -218,17 +219,32 @@ def ble_setup():
         write_perm=_bleio.Attribute.OPEN,
         max_length=2, fixed_length=True,
         initial_value=SLEEP_SECONDS.to_bytes(2, 'little'))
-    _bleio.adapter.name = "PlantBit"
+    _bleio.adapter.name = ble_device_name()
     return mc, pc, sc
 
+def ble_device_name():
+    base = "PlantBit"
+    try:
+        addr = str(_bleio.adapter.address)
+        suffix = addr.replace(":", "")[-4:]
+        if suffix:
+            return "{}-{}".format(base, suffix)
+    except Exception:
+        pass
+    return base
+
 def ble_adv_data():
+    # Advertising data format is a series of: [len][type][payload]
     ad = bytearray()
-    ad.extend(b'\x02\x01\x06')                    # flags
-    name = b"PlantBit"
-    ad.extend(bytes([len(name) + 1, 0x09]))        # complete local name
+    # len=2, type=0x01 (Flags), flags=0x06 (LE General Discoverable + BR/EDR not supported)
+    ad.extend(b'\x02\x01\x06')
+    name = ble_device_name().encode("ascii")
+    # len=name+1, type=0x09 (Complete Local Name)
+    ad.extend(bytes([len(name) + 1, 0x09]))
     ad.extend(name)
     ub = SVC_UUID.uuid128
-    ad.extend(bytes([len(ub) + 1, 0x07]))          # 128-bit svc UUID list
+    # len=16+1, type=0x07 (Complete List of 128-bit Service UUIDs)
+    ad.extend(bytes([len(ub) + 1, 0x07]))
     ad.extend(ub)
     return bytes(ad)
 
@@ -282,13 +298,16 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
 
     was_connected = False
     deadline = time.monotonic() + ACTIVE_SECONDS
-    last_ble_extend = 0
+    last_ble_poll = 0
 
     def extend_deadline(seconds, reason):
         nonlocal deadline
         now = time.monotonic()
-        new_deadline = max(deadline, now + seconds)
-        if new_deadline != deadline:
+        remaining = deadline - now
+        if remaining > (seconds - BLE_EXTEND_MARGIN):
+            return
+        new_deadline = now + seconds
+        if new_deadline > deadline:
             deadline = new_deadline
             remaining = int(deadline - now)
             log(reason, "active window +", seconds, "s; remaining:", remaining, "s")
@@ -296,7 +315,31 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
     while time.monotonic() < deadline:
         led.refresh()
 
+        # --- Buttons ---
+        if not btn_a.value:
+            log("BTN A: reading sensor")
+            flash_icon(led, ICON_READ)
+            moisture, history = do_read(mc, led)
+            extend_deadline(EXTEND_SECONDS, "BTN A")
+            while not btn_a.value:
+                led.refresh()
+
+        if not btn_b.value:
+            log("BTN B: activating pump")
+            flash_icon(led, ICON_PUMP)
+            pump_on()
+            moisture, history = do_read(mc, led)
+            extend_deadline(EXTEND_SECONDS, "BTN B")
+            while not btn_b.value:
+                led.refresh()
+
         # --- BLE ---
+        now = time.monotonic()
+        if (now - last_ble_poll) < BLE_POLL_INTERVAL:
+            time.sleep(0.01)
+            continue
+        last_ble_poll = now
+
         if _bleio.adapter.connected:
             if not was_connected:
                 was_connected = True
@@ -304,7 +347,6 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
                 flash_icon(led, ICON_BLE)
                 draw_graph(led, history)
                 extend_deadline(BLE_EXTEND_SECONDS, "BLE: connected")
-                last_ble_extend = time.monotonic()
             # Handle moisture read requests via write-to-request
             mv = mc.value
             if mv is not None and mv != last_moisture_value:
@@ -329,10 +371,7 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
                     WAKES_PER_DAY = (24 * 3600) // SLEEP_SECONDS
                     log("BLE: sleep set to", SLEEP_SECONDS, "s, wakes/day:", WAKES_PER_DAY)
             # Any active connection keeps extending the deadline
-            now = time.monotonic()
-            if (now - last_ble_extend) >= BLE_EXTEND_THROTTLE:
-                extend_deadline(BLE_EXTEND_SECONDS, "BLE: active")
-                last_ble_extend = now
+            extend_deadline(BLE_EXTEND_SECONDS, "BLE: active")
         else:
             if was_connected:
                 was_connected = False
@@ -342,24 +381,6 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
                     ble_start_adv(adv)
                 except:
                     pass
-
-        # --- Buttons ---
-        if not btn_a.value:
-            log("BTN A: reading sensor")
-            flash_icon(led, ICON_READ)
-            moisture, history = do_read(mc, led)
-            extend_deadline(EXTEND_SECONDS, "BTN A")
-            while not btn_a.value:
-                led.refresh()
-
-        if not btn_b.value:
-            log("BTN B: activating pump")
-            flash_icon(led, ICON_PUMP)
-            pump_on()
-            moisture, history = do_read(mc, led)
-            extend_deadline(EXTEND_SECONDS, "BTN B")
-            while not btn_b.value:
-                led.refresh()
 
         time.sleep(0.01)
 
