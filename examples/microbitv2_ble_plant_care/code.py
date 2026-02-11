@@ -34,6 +34,11 @@ import alarm
 import _bleio
 from led_matrix import LEDMatrix
 
+
+def log(*args):
+    ts = time.monotonic()
+    print("[{:.1f}]".format(ts), *args)
+
 # --- Config (overridable via settings.toml) ---
 try:
     import os
@@ -42,7 +47,7 @@ try:
 except (NotImplementedError, TypeError):
     SLEEP_SECONDS = 60
     SLEEP_MODE = "light"
-print("config: sleep", SLEEP_SECONDS, "s, mode", SLEEP_MODE)
+log("config: sleep", SLEEP_SECONDS, "s, mode", SLEEP_MODE)
 ACTIVE_SECONDS = 15
 EXTEND_SECONDS = 5
 BLE_EXTEND_SECONDS = 30
@@ -73,6 +78,11 @@ INIT_MARKER = 0xAA
 
 # Track last pump time (not persisted, resets each boot)
 last_pump_time = 0
+
+
+def log(*args):
+    ts = time.monotonic()
+    print("[{:.1f}]".format(ts), *args)
 
 
 # ============================================================
@@ -158,7 +168,7 @@ def read_moisture():
     global last_pump_time
     since_pump = time.monotonic() - last_pump_time
     if since_pump < PUMP_COOLDOWN:
-        print("moisture: skipped (pump", int(PUMP_COOLDOWN - since_pump), "s ago)")
+        log("moisture: skipped (pump", int(PUMP_COOLDOWN - since_pump), "s ago)")
         return None
     pin = analogio.AnalogIn(board.P1)
     total = 0
@@ -174,7 +184,7 @@ def read_moisture():
 
 def pump_on(seconds=PUMP_SECONDS):
     global last_pump_time
-    print("PUMP ON for", seconds, "s")
+    log("PUMP ON for", seconds, "s")
     p = digitalio.DigitalInOut(board.P2)
     p.direction = digitalio.Direction.OUTPUT
     p.value = True
@@ -182,7 +192,7 @@ def pump_on(seconds=PUMP_SECONDS):
     p.value = False
     p.deinit()
     last_pump_time = time.monotonic()
-    print("PUMP OFF")
+    log("PUMP OFF")
 
 
 # ============================================================
@@ -229,9 +239,9 @@ def ble_start_adv(adv):
     try:
         _bleio.adapter.start_advertising(
             data=adv, connectable=True, interval=0.1, timeout=0)
-        print("BLE advertising started")
+        log("BLE advertising started")
     except Exception as e:
-        print("adv err:", e)
+        log("adv err:", e)
 
 def ble_stop():
     try:
@@ -253,7 +263,7 @@ def do_read(mc, led):
     m = read_moisture()
     if m is None:
         return None, hist_get()
-    print("moisture:", m, "% | wake:", _wake_count(), "/", WAKES_PER_DAY,
+    log("moisture:", m, "% | wake:", _wake_count(), "/", WAKES_PER_DAY,
           "| hi:", alarm.sleep_memory[13], "lo:", alarm.sleep_memory[14])
     hist_update(m)
     history = hist_get()
@@ -265,7 +275,7 @@ def do_read(mc, led):
 def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
     """One wake cycle: read sensor, advertise, handle events."""
     global SLEEP_SECONDS, WAKES_PER_DAY
-    print("\n--- wake ---")
+    log("--- wake ---")
     moisture, history = do_read(mc, led)
 
     adv = ble_adv_data()
@@ -281,7 +291,7 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
         if new_deadline != deadline:
             deadline = new_deadline
             remaining = int(deadline - now)
-            print(reason, "active window +", seconds, "s; remaining:", remaining, "s")
+            log(reason, "active window +", seconds, "s; remaining:", remaining, "s")
 
     while time.monotonic() < deadline:
         led.refresh()
@@ -290,14 +300,14 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
         if _bleio.adapter.connected:
             if not was_connected:
                 was_connected = True
-                print("BLE: connected")
+                log("BLE: connected")
                 flash_icon(led, ICON_BLE)
                 draw_graph(led, history)
                 extend_deadline(BLE_EXTEND_SECONDS, "BLE: connected")
             pv = pc.value
             if pv and pv[0] > 0:
                 duration = pv[0]
-                print("BLE: pump requested for", duration, "s")
+                log("BLE: pump requested for", duration, "s")
                 flash_icon(led, ICON_PUMP)
                 pump_on(duration)
                 pc.value = bytes([0])
@@ -310,13 +320,13 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
                 if 10 <= new_sleep <= 3600 and new_sleep != SLEEP_SECONDS:
                     SLEEP_SECONDS = new_sleep
                     WAKES_PER_DAY = (24 * 3600) // SLEEP_SECONDS
-                    print("BLE: sleep set to", SLEEP_SECONDS, "s, wakes/day:", WAKES_PER_DAY)
+                    log("BLE: sleep set to", SLEEP_SECONDS, "s, wakes/day:", WAKES_PER_DAY)
             # Any active connection keeps extending the deadline
             extend_deadline(BLE_EXTEND_SECONDS, "BLE: active")
         else:
             if was_connected:
                 was_connected = False
-                print("BLE: disconnected, +30s grace")
+                log("BLE: disconnected, +30s grace")
                 extend_deadline(BLE_EXTEND_SECONDS, "BLE: disconnected")
                 try:
                     ble_start_adv(adv)
@@ -325,7 +335,7 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
 
         # --- Buttons ---
         if not btn_a.value:
-            print("BTN A: reading sensor")
+            log("BTN A: reading sensor")
             flash_icon(led, ICON_READ)
             moisture, history = do_read(mc, led)
             extend_deadline(EXTEND_SECONDS, "BTN A")
@@ -333,7 +343,7 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
                 led.refresh()
 
         if not btn_b.value:
-            print("BTN B: activating pump")
+            log("BTN B: activating pump")
             flash_icon(led, ICON_PUMP)
             pump_on()
             moisture, history = do_read(mc, led)
@@ -342,7 +352,7 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
                 led.refresh()
 
     ble_stop()
-    print("--- active window closed ---")
+    log("--- active window closed ---")
 
 
 # alarm module present but TimeAlarm/PinAlarm not yet implemented on micro:bit v2.
@@ -373,7 +383,7 @@ def init_buttons():
 
 def main():
     hist_init()
-    print("PlantBit starting | sleep:", SLEEP_SECONDS,
+    log("PlantBit starting | sleep:", SLEEP_SECONDS,
           "s | mode:", SLEEP_MODE, "| wakes/day:", WAKES_PER_DAY)
 
     led = LEDMatrix()
@@ -393,11 +403,11 @@ def main():
         #     btn_a.deinit(); btn_b.deinit()
         #     woke = alarm.light_sleep_until_alarms(*make_sleep_alarms())
         #     print("woke by:", woke)
-        print("sleeping", SLEEP_SECONDS, "s (buttons wake)")
+        log("sleeping", SLEEP_SECONDS, "s (buttons wake)")
         end = time.monotonic() + SLEEP_SECONDS
         while time.monotonic() < end:
             if not btn_a.value or not btn_b.value:
-                print("woke by: button")
+                log("woke by: button")
                 break
             time.sleep(0.1)
         btn_a.deinit()
