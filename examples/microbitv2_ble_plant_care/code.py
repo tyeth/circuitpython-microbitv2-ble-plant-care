@@ -59,10 +59,20 @@ N_SAMPLES = 10
 WAKES_PER_DAY = (24 * 3600) // SLEEP_SECONDS  # 1440 at 60s
 
 # --- BLE UUIDs ---
-SVC_UUID = _bleio.UUID("12340001-1234-5678-1234-56789abcdef0")
+SVC_UUID_STR = "12340001-1234-5678-1234-56789abcdef0"
+SVC_UUID = _bleio.UUID(SVC_UUID_STR)
 MOIST_UUID = _bleio.UUID("12340002-1234-5678-1234-56789abcdef0")
 PUMP_UUID = _bleio.UUID("12340003-1234-5678-1234-56789abcdef0")
 SLEEP_UUID = _bleio.UUID("12340004-1234-5678-1234-56789abcdef0")
+
+
+def uuid128_le_from_str(uuid_str):
+    """Return 16-byte UUID in little-endian order, parsed without bytes.fromhex()."""
+    hex_str = uuid_str.replace("-", "")
+    raw = bytearray()
+    for i in range(0, len(hex_str), 2):
+        raw.append(int(hex_str[i:i + 2], 16))
+    return bytearray(reversed(raw))
 
 # --- Icons (5 rows, MSB=leftmost col) ---
 ICON_PUMP = [0b00100, 0b01110, 0b11111, 0b11111, 0b01110]  # water drop
@@ -220,30 +230,30 @@ def ble_setup():
         max_length=2, fixed_length=True,
         initial_value=SLEEP_SECONDS.to_bytes(2, 'little'))
     _bleio.adapter.name = ble_device_name()
+    log("BLE name:", _bleio.adapter.name)
     return mc, pc, sc
 
 def ble_device_name():
     base = "PlantBit"
+    addr = _bleio.adapter.address
     try:
-        addr = str(_bleio.adapter.address)
-        suffix = addr.replace(":", "")[-4:]
-        if suffix:
-            return "{}-{}".format(base, suffix)
-    except Exception:
-        pass
+        addr_bytes = addr.address_bytes
+        mac_bytes = bytes(reversed(addr_bytes))
+        suffix = "{:02X}{:02X}".format(mac_bytes[-2], mac_bytes[-1])
+        return "{}-{}".format(base, suffix)
+    except Exception as e:
+        log("BLE name fallback:", e)
     return base
 
 def ble_adv_data():
     # Advertising data format is a series of: [len][type][payload]
+    # 0x01 = Flags, 0x09 = Complete Local Name, 0x07 = 128-bit Service UUID list
     ad = bytearray()
-    # len=2, type=0x01 (Flags), flags=0x06 (LE General Discoverable + BR/EDR not supported)
     ad.extend(b'\x02\x01\x06')
-    name = ble_device_name().encode("ascii")
-    # len=name+1, type=0x09 (Complete Local Name)
+    name = bytes([ord(c) for c in ble_device_name()])
     ad.extend(bytes([len(name) + 1, 0x09]))
     ad.extend(name)
-    ub = SVC_UUID.uuid128
-    # len=16+1, type=0x07 (Complete List of 128-bit Service UUIDs)
+    ub = uuid128_le_from_str(SVC_UUID_STR)
     ad.extend(bytes([len(ub) + 1, 0x07]))
     ad.extend(ub)
     return bytes(ad)
