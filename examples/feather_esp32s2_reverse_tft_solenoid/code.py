@@ -1,13 +1,14 @@
-# Multi-Plant Watering Controller - Feather ESP32-S2 Reverse TFT
+# Multi-Plant Watering Controller - Feather ESP32-S3 Reverse TFT
 # Uses Adafruit I2C 8-Channel Solenoid Driver (MCP23017, product #6318)
 # Solenoids 0-4 = 5 plant zones, 5-7 = spare/future
 #
 # Reads moisture from Adafruit IO (published by micro:bit BLE gateway).
 # For now, one moisture value is used as proxy for all 5 zones.
 # Eventually each zone gets its own sensor over I2C/WiFi/BLE.
+# Uses BLE (on S3) to request micro:bit pump activation per zone.
 #
 # Requires libraries: adafruit_mcp230xx, adafruit_requests,
-#   adafruit_display_text, adafruit_bitmap_font (optional)
+#   adafruit_display_text, adafruit_bitmap_font (optional), adafruit_ble
 #
 # WiFi credentials and Adafruit IO key go in settings.toml:
 #   CIRCUITPY_WIFI_SSID = "yourssid"
@@ -26,6 +27,11 @@ import wifi
 import ssl
 import socketpool
 import adafruit_requests
+from adafruit_ble import BLERadio
+from adafruit_ble.advertising.standard import ProvideServicesAdvertisement
+from adafruit_ble.characteristics import Characteristic
+from adafruit_ble.services import Service
+from adafruit_ble.uuid import UUID
 from adafruit_display_text import label
 from adafruit_mcp230xx.mcp23017 import MCP23017
 
@@ -33,9 +39,23 @@ from adafruit_mcp230xx.mcp23017 import MCP23017
 NUM_ZONES = 5
 POLL_INTERVAL = 60          # seconds between Adafruit IO polls
 WATER_THRESHOLD = 30        # moisture % below which to water
-WATER_DURATION = 3          # seconds per solenoid activation
+WATER_DURATION = 3          # seconds per solenoid activation (default)
 WATER_COOLDOWN = 300        # minimum seconds between waterings per zone
 SOLENOID_PINS = (0, 1, 2, 3, 4)  # MCP23017 pin numbers for zones 0-4
+
+# Per-zone watering durations (seconds). Falls back to WATER_DURATION.
+ZONE_WATER_SECONDS = [WATER_DURATION] * NUM_ZONES
+
+# --- BLE (micro:bit pump service) ---
+PLANTBIT_NAME = "PlantBit"
+BLE_SCAN_SECONDS = 4
+BLE_CONNECT_TIMEOUT = 6
+BLE_CONNECT_RETRIES = 2
+SKIP_WATER_IF_PUMP_FAIL = False
+SVC_UUID = UUID("12340001-1234-5678-1234-56789abcdef0")
+MOIST_UUID = UUID("12340002-1234-5678-1234-56789abcdef0")
+PUMP_UUID = UUID("12340003-1234-5678-1234-56789abcdef0")
+SLEEP_UUID = UUID("12340004-1234-5678-1234-56789abcdef0")
 
 # --- Adafruit IO ---
 AIO_USER = os.getenv("ADAFRUIT_AIO_USERNAME", "")
@@ -66,14 +86,22 @@ class SolenoidDriver:
             p.switch_to_output(value=False)
             self.pins.append(p)
 
+    def turn_on(self, zone):
+        if 0 <= zone < len(self.pins):
+            print("SOLENOID", zone, "(", ZONE_NAMES[zone], ") ON")
+            self.pins[zone].value = True
+
+    def turn_off(self, zone):
+        if 0 <= zone < len(self.pins):
+            self.pins[zone].value = False
+            print("SOLENOID", zone, "OFF")
+
     def activate(self, zone, seconds):
         """Turn on a solenoid for a given duration."""
         if 0 <= zone < len(self.pins):
-            print("SOLENOID", zone, "(", ZONE_NAMES[zone], ") ON for", seconds, "s")
-            self.pins[zone].value = True
+            self.turn_on(zone)
             time.sleep(seconds)
-            self.pins[zone].value = False
-            print("SOLENOID", zone, "OFF")
+            self.turn_off(zone)
 
     def all_off(self):
         for p in self.pins:
@@ -81,7 +109,7 @@ class SolenoidDriver:
 
 
 class PlantDisplay:
-    """TFT display for the Feather ESP32-S2 Reverse TFT (240x135)."""
+    """TFT display for the Feather ESP32-S3 Reverse TFT (240x135)."""
     def __init__(self):
         self.display = board.DISPLAY
         self.group = displayio.Group()
@@ -145,6 +173,108 @@ class PlantDisplay:
         self.status.text = text[:38]
 
 
+class PlantBitService(Service):
+    uuid = SVC_UUID
+    moisture = Characteristic(
+        MOIST_UUID,
+        properties=Characteristic.READ | Characteristic.NOTIFY,
+        read_perm=Characteristic.OPEN,
+        write_perm=Characteristic.NO_ACCESS,
+        max_length=1,
+        fixed_length=True,
+    )
+    pump = Characteristic(
+        PUMP_UUID,
+        properties=Characteristic.READ | Characteristic.WRITE,
+        read_perm=Characteristic.OPEN,
+        write_perm=Characteristic.OPEN,
+        max_length=1,
+        fixed_length=True,
+    )
+    sleep = Characteristic(
+        SLEEP_UUID,
+        properties=Characteristic.READ | Characteristic.WRITE,
+        read_perm=Characteristic.OPEN,
+        write_perm=Characteristic.OPEN,
+        max_length=2,
+        fixed_length=True,
+    )
+
+
+class PlantBitBleClient:
+    def __init__(self):
+        self.ble = BLERadio()
+        self.connection = None
+        self.service = None
+
+    def _find_advertisement(self):
+        for adv in self.ble.start_scan(
+            ProvideServicesAdvertisement,
+            timeout=BLE_SCAN_SECONDS,
+        ):
+            if SVC_UUID in adv.services:
+                if not adv.complete_name or adv.complete_name == PLANTBIT_NAME:
+                    return adv
+        return None
+
+    def connect(self):
+        if self.connection and self.connection.connected:
+            return True
+        adv = self._find_advertisement()
+        self.ble.stop_scan()
+        if not adv:
+            print("BLE: no PlantBit found")
+            return False
+        try:
+            self.connection = self.ble.connect(adv, timeout=BLE_CONNECT_TIMEOUT)
+        except Exception as e:
+            print("BLE: connect failed:", e)
+            self.connection = None
+            return False
+        try:
+            self.service = self.connection[PlantBitService]
+        except Exception as e:
+            print("BLE: service missing:", e)
+            self.disconnect()
+            return False
+        print("BLE: connected to PlantBit")
+        return True
+
+    def disconnect(self):
+        if self.connection:
+            try:
+                self.connection.disconnect()
+            except Exception:
+                pass
+        self.connection = None
+        self.service = None
+
+    def request_pump(self, seconds):
+        if seconds <= 0:
+            return False
+        duration = max(1, min(255, int(seconds)))
+        payload = bytes([duration])
+        for attempt in range(1, BLE_CONNECT_RETRIES + 2):
+            if not self.connect():
+                print("BLE: connect attempt", attempt, "failed")
+                self.disconnect()
+                continue
+            try:
+                self.service.pump = payload
+                print("BLE: pump requested for", duration, "s")
+                return True
+            except Exception:
+                try:
+                    self.service.pump.value = payload
+                    print("BLE: pump requested for", duration, "s")
+                    return True
+                except Exception as e:
+                    print("BLE: pump write failed (attempt", attempt, "):", e)
+                    self.disconnect()
+        print("BLE: pump request failed after retries")
+        return False
+
+
 def connect_wifi():
     """Connect to WiFi using settings.toml credentials."""
     ssid = os.getenv("CIRCUITPY_WIFI_SSID")
@@ -197,6 +327,9 @@ def main():
     driver = SolenoidDriver(i2c)
     driver.all_off()
 
+    # BLE client to micro:bit pump service
+    ble_client = PlantBitBleClient()
+
     # Per-zone state
     last_watered = [0] * NUM_ZONES  # monotonic time of last watering
     zone_moisture = [None] * NUM_ZONES
@@ -227,9 +360,19 @@ def main():
                 continue
             since_last = now - last_watered[z]
             if m < WATER_THRESHOLD and since_last >= WATER_COOLDOWN:
+                seconds = ZONE_WATER_SECONDS[z]
                 disp.update_zone(z, m, watering=True)
                 disp.set_status(f"Watering {ZONE_NAMES[z]}...")
-                driver.activate(z, WATER_DURATION)
+                driver.turn_on(z)
+                pump_ok = ble_client.request_pump(seconds)
+                if not pump_ok and SKIP_WATER_IF_PUMP_FAIL:
+                    disp.set_status(f"Pump failed for {ZONE_NAMES[z]}")
+                    driver.turn_off(z)
+                    ble_client.disconnect()
+                    continue
+                time.sleep(seconds)
+                driver.turn_off(z)
+                ble_client.disconnect()
                 last_watered[z] = time.monotonic()
                 disp.update_zone(z, m, watering=False)
                 disp.set_status(f"Watered {ZONE_NAMES[z]}")
