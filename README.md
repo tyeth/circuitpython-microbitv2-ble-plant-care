@@ -1,6 +1,6 @@
 # PlantBit - BLE Plant Watering System
 
-Automated plant watering using CircuitPython, BLE, and Adafruit hardware. A micro:bit v2 reads soil moisture and controls a pump over BLE, while a Feather ESP32-S2 coordinates multi-zone watering with solenoid valves.
+Automated plant watering using CircuitPython, BLE, and Adafruit hardware. A micro:bit v2 reads soil moisture and controls a pump over BLE, while a Feather ESP32-S3 coordinates multi-zone watering with solenoid valves.
 
 ## Hardware
 
@@ -15,11 +15,11 @@ Automated plant watering using CircuitPython, BLE, and Adafruit hardware. A micr
 
 **Wiring:** The Bonsai Buckaroo clips onto the micro:bit edge connector. P1 = soil moisture (analog), P2 = pump MOSFET (digital).
 
-### Controller Node (Feather ESP32-S2 Reverse TFT)
+### Controller Node (Feather ESP32-S3 Reverse TFT)
 
 | Component | Purpose |
 |-----------|---------|
-| [Feather ESP32-S2 Reverse TFT](https://www.adafruit.com/product/5345) | WiFi controller with built-in 240x135 TFT |
+| [Feather ESP32-S3 Reverse TFT](https://www.adafruit.com/product/5691) | WiFi + BLE controller with built-in 240x135 TFT |
 | [8-Channel Solenoid Driver](https://www.adafruit.com/product/6318) | I2C STEMMA QT solenoid/valve driver (MCP23017) |
 | 5x solenoid valves | One per plant zone |
 
@@ -46,10 +46,10 @@ examples/microbitv2_ble_plant_care/code.py
 
 **No additional libraries required** - uses built-in `_bleio`, `alarm`, `analogio`, `digitalio`.
 
-### Feather ESP32-S2 - Multi-Zone Solenoid Controller
+### Feather ESP32-S3 - Multi-Zone Solenoid Controller
 
 ```
-examples/feather_esp32s2_reverse_tft_solenoid/code.py
+examples/feather_esp32s3_reverse_tft_solenoid/code.py
 ```
 
 **Features:**
@@ -57,14 +57,14 @@ examples/feather_esp32s2_reverse_tft_solenoid/code.py
 - Polls Adafruit IO for moisture data over WiFi
 - TFT display: per-zone moisture, color-coded status, watering activity
 - Auto-waters zones below threshold (default 30%) with cooldown
+- BLE client: connects to micro:bit to trigger pump activation per zone
 - Currently uses a single moisture value as proxy for all 5 zones
-
-**Note:** The Feather ESP32-S2 does not support BLE. If you want BLE on the controller side, use an ESP32-S3 variant (we will sort this later).
 
 **Required CircuitPython libraries** (install via [circup](https://github.com/adafruit/circup) or the [bundle](https://circuitpython.org/libraries)):
 - `adafruit_mcp230xx`
 - `adafruit_requests`
 - `adafruit_display_text`
+- `adafruit_ble`
 
 ## BLE Service
 
@@ -119,7 +119,7 @@ SLEEP_SECONDS = 60
 | `deep` | Lowest | Yes | No (reconnect needed) | Restarts |
 | `none` | Highest | No (waits for timer) | Yes | Continues |
 
-### Feather ESP32-S2 - settings.toml
+### Feather ESP32-S3 - settings.toml
 
 Copy `settings.toml.example` to `settings.toml` and fill in credentials:
 
@@ -164,36 +164,46 @@ Status icons flash for 1 second over the graph, then revert:
 ## Architecture
 
 ```
-┌─────────────────┐     BLE      ┌──────────────┐
-│  micro:bit v2   │◄────────────►│  Phone / App │
-│  + Buckaroo     │              │  (nRF Connect)│
-│                 │              └──────────────┘
+                         ┌──────────────┐
+              BLE        │  Phone / App │
+          ┌─────────────►│  (nRF Connect)│
+          │              └──────────────┘
+          │              (manual testing)
+          │
+┌─────────┴───────┐
+│  micro:bit v2   │
+│  + Buckaroo     │
+│                 │
 │  Soil sensor ───┤
-│  Pump MOSFET ───┤                    │
-│  5x5 LED ───────┤              Adafruit IO
-│  BLE peripheral │              (MQTT/REST)
-└─────────────────┘                    │
-                                       ▼
-                              ┌─────────────────┐
-                              │ Feather ESP32-S2 │
-                              │ Reverse TFT      │
-                              │                   │
-                              │  WiFi ────────────┤
-                              │  TFT display ─────┤
-                              │  I2C ─────┐       │
-                              └───────────┼───────┘
-                                          │
-                                          ▼
-                              ┌─────────────────┐
-                              │  8-Ch Solenoid   │
-                              │  Driver (#6318)  │
-                              │                   │
-                              │  Ch 0-4: valves  │
-                              │  Ch 5-7: spare   │
-                              └─────────────────┘
+│  Pump MOSFET ───┤
+│  5x5 LED ───────┤
+│  BLE peripheral │
+└─────────┬───────┘
+          │
+          │ BLE (pump control)
+          │
+          ▼
+┌─────────────────┐              Adafruit IO
+│ Feather ESP32-S3 │              (MQTT/REST)
+│ Reverse TFT      │                  │
+│                  │                  ▼
+│  WiFi ───────────┤────────────────────
+│  BLE client ─────┤
+│  TFT display ────┤
+│  I2C ─────┐      │
+└───────────┼──────┘
+            │
+            ▼
+┌─────────────────┐
+│  8-Ch Solenoid   │
+│  Driver (#6318)  │
+│                  │
+│  Ch 0-4: valves  │
+│  Ch 5-7: spare   │
+└─────────────────┘
 ```
 
-**Current state:** The micro:bit reads a single soil sensor and exposes it over BLE. The Feather polls Adafruit IO and uses that value as a proxy for all 5 zones.
+**Current state:** The micro:bit reads a single soil sensor and exposes it over BLE. The Feather polls Adafruit IO and uses that value as a proxy for all 5 zones. The Feather connects to the micro:bit over BLE to trigger pump activation when watering each zone. nRF Connect can optionally control the micro:bit directly for testing.
 
 **Future:** Each zone gets its own sensor (I2C, WiFi, or BLE), and the micro:bit publishes to Adafruit IO via a BLE-to-WiFi gateway.
 
