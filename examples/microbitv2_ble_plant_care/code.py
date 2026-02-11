@@ -4,7 +4,7 @@
 # BLE Testing with nRF Connect:
 #   Device name: "PlantBit"
 #   Service:  12340001-1234-5678-1234-56789abcdef0
-#   Moisture: 12340002-1234-5678-1234-56789abcdef0  READ/NOTIFY  (1 byte, 0-100%)
+#   Moisture: 12340002-1234-5678-1234-56789abcdef0  READ/NOTIFY/WRITE  (1 byte, 0-100%)
 #   Pump:     12340003-1234-5678-1234-56789abcdef0  READ/WRITE   (1 byte = seconds, e.g. 0x03 = 3s)
 #   Sleep:    12340004-1234-5678-1234-56789abcdef0  READ/WRITE   (uint16 LE, seconds)
 #             nRF Connect examples: 3C00 = 60s, 2C01 = 300s (5 min)
@@ -51,6 +51,7 @@ log("config: sleep", SLEEP_SECONDS, "s, mode", SLEEP_MODE)
 ACTIVE_SECONDS = 15
 EXTEND_SECONDS = 5
 BLE_EXTEND_SECONDS = 30
+BLE_EXTEND_THROTTLE = 1.0
 PUMP_SECONDS = 0.5
 PUMP_COOLDOWN = 10  # skip moisture reads this many seconds after pump
 N_SAMPLES = 10
@@ -78,11 +79,8 @@ INIT_MARKER = 0xAA
 
 # Track last pump time (not persisted, resets each boot)
 last_pump_time = 0
-
-
-def log(*args):
-    ts = time.monotonic()
-    print("[{:.1f}]".format(ts), *args)
+# Track BLE moisture request value (not persisted)
+last_moisture_value = None
 
 
 # ============================================================
@@ -202,9 +200,10 @@ def ble_setup():
     svc = _bleio.Service(SVC_UUID)
     mc = _bleio.Characteristic.add_to_service(
         svc, MOIST_UUID,
-        properties=_bleio.Characteristic.READ | _bleio.Characteristic.NOTIFY,
+        properties=_bleio.Characteristic.READ | _bleio.Characteristic.NOTIFY |
+                   _bleio.Characteristic.WRITE,
         read_perm=_bleio.Attribute.OPEN,
-        write_perm=_bleio.Attribute.NO_ACCESS,
+        write_perm=_bleio.Attribute.OPEN,
         max_length=1, fixed_length=True,
         initial_value=bytes([0]))
     pc = _bleio.Characteristic.add_to_service(
@@ -275,14 +274,17 @@ def do_read(mc, led):
 def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
     """One wake cycle: read sensor, advertise, handle events."""
     global SLEEP_SECONDS, WAKES_PER_DAY
+    global last_moisture_value
     log("--- wake ---")
     moisture, history = do_read(mc, led)
+    last_moisture_value = mc.value
 
     adv = ble_adv_data()
     ble_start_adv(adv)
 
     was_connected = False
     deadline = time.monotonic() + ACTIVE_SECONDS
+    last_ble_extend = 0
 
     def extend_deadline(seconds, reason):
         nonlocal deadline
@@ -304,6 +306,13 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
                 flash_icon(led, ICON_BLE)
                 draw_graph(led, history)
                 extend_deadline(BLE_EXTEND_SECONDS, "BLE: connected")
+                last_ble_extend = time.monotonic()
+            # Handle moisture read requests via write-to-request
+            mv = mc.value
+            if mv is not None and mv != last_moisture_value:
+                log("BLE: moisture request, fresh read")
+                moisture, history = do_read(mc, led)
+                last_moisture_value = mc.value
             pv = pc.value
             if pv and pv[0] > 0:
                 duration = pv[0]
@@ -322,7 +331,10 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
                     WAKES_PER_DAY = (24 * 3600) // SLEEP_SECONDS
                     log("BLE: sleep set to", SLEEP_SECONDS, "s, wakes/day:", WAKES_PER_DAY)
             # Any active connection keeps extending the deadline
-            extend_deadline(BLE_EXTEND_SECONDS, "BLE: active")
+            now = time.monotonic()
+            if (now - last_ble_extend) >= BLE_EXTEND_THROTTLE:
+                extend_deadline(BLE_EXTEND_SECONDS, "BLE: active")
+                last_ble_extend = now
         else:
             if was_connected:
                 was_connected = False
@@ -350,6 +362,8 @@ def wake_cycle(led, mc, pc, sc, btn_a, btn_b):
             extend_deadline(EXTEND_SECONDS, "BTN B")
             while not btn_b.value:
                 led.refresh()
+
+        time.sleep(0.01)
 
     ble_stop()
     log("--- active window closed ---")

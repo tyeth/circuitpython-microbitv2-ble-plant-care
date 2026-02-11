@@ -59,6 +59,8 @@ examples/feather_esp32s2_reverse_tft_solenoid/code.py
 - Auto-waters zones below threshold (default 30%) with cooldown
 - Currently uses a single moisture value as proxy for all 5 zones
 
+**Note:** The Feather ESP32-S2 does not support BLE. If you want BLE on the controller side, use an ESP32-S3 variant (we will sort this later).
+
 **Required CircuitPython libraries** (install via [circup](https://github.com/adafruit/circup) or the [bundle](https://circuitpython.org/libraries)):
 - `adafruit_mcp230xx`
 - `adafruit_requests`
@@ -71,7 +73,7 @@ The micro:bit advertises as **"PlantBit"** with a custom GATT service.
 | Characteristic | UUID | Properties | Format |
 |----------------|------|------------|--------|
 | Service | `12340001-1234-5678-1234-56789abcdef0` | - | - |
-| Moisture | `12340002-1234-5678-1234-56789abcdef0` | READ, NOTIFY | 1 byte, 0-100 (%) |
+| Moisture | `12340002-1234-5678-1234-56789abcdef0` | READ, NOTIFY, WRITE | 1 byte, 0-100 (%) |
 | Pump | `12340003-1234-5678-1234-56789abcdef0` | READ, WRITE | 1 byte = duration in seconds |
 | Sleep Interval | `12340004-1234-5678-1234-56789abcdef0` | READ, WRITE | uint16 LE, seconds (10-3600) |
 
@@ -80,8 +82,9 @@ The micro:bit advertises as **"PlantBit"** with a custom GATT service.
 1. Scan for **"PlantBit"**
 2. Connect and expand the service starting `12340001...`
 3. **Read moisture:** tap the read button on `...0002` - returns a byte like `0x1E` (30%)
-4. **Trigger pump for 3 seconds:** write `03` to `...0003`
-5. **Set sleep to 5 minutes:** write `2C01` to `...0004` (0x012C = 300 in little-endian)
+4. **Force a fresh moisture reading:** write a different byte each time (e.g. `00` then `01`, or a rolling millis byte) to `...0002`, then read again
+5. **Trigger pump for 3 seconds:** write `03` to `...0003`
+6. **Set sleep to 5 minutes:** write `2C01` to `...0004` (0x012C = 300 in little-endian)
 
 Common sleep interval hex values:
 
